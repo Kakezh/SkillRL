@@ -202,7 +202,12 @@ class SkillUpdater:
             if str(layer).strip()
         ]
         target_layer = self._default_layer_for_variant(normalized_variant)
-        if target_layer:
+        if normalized_variant == "v4":
+            layer_instruction = (
+                "- Evolution variant: v4\n"
+                "- Generate skills for layer in {plan, scene} only; do not generate skills with layer=action.\n"
+            )
+        elif target_layer:
             layer_instruction = (
                 f"- Evolution variant: {normalized_variant}\n"
                 f"- Generate skills for layer='{target_layer}' only.\n"
@@ -246,8 +251,6 @@ Example format:
             return "plan"
         if variant == "v3":
             return "scene"
-        if variant == "v4":
-            return "plan"
         return None
 
     def _format_trajectory(self, steps: List[Dict]) -> str:

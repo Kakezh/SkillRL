@@ -5,8 +5,7 @@ import tempfile
 import types
 from pathlib import Path
 
-
-REPO_ROOT = Path("/home/runner/work/SkillRL/SkillRL")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 MEMORY_DIR = REPO_ROOT / "agent_system" / "memory"
 
 
@@ -97,3 +96,24 @@ def test_analysis_prompt_includes_layer_constraints():
     )
     assert "Generate skills for layer='plan' only." in prompt
     assert "Frozen layers (do not mutate): action" in prompt
+
+
+def test_analysis_prompt_v4_allows_plan_and_scene():
+    skill_updater = _load_memory_module("skill_updater")
+    SkillUpdater = skill_updater.SkillUpdater
+    updater = SkillUpdater.__new__(SkillUpdater)
+    updater.max_new_skills_per_update = 1
+    prompt = updater._build_analysis_prompt(
+        failed_trajectories=[
+            {
+                "task": "Buy a safe laptop",
+                "task_type": "electronics",
+                "trajectory": [{"action": "search", "observation": "few options"}],
+            }
+        ],
+        current_skills={"general_skills": [], "task_specific_skills": {}},
+        next_dyn_idx=1,
+        evolution_variant="v4",
+        frozen_layers=["action"],
+    )
+    assert "Generate skills for layer in {plan, scene} only" in prompt
