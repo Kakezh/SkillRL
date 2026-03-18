@@ -889,9 +889,17 @@ class RayPPOTrainer:
 
         # 分析失败并生成新 skills
         print(f"[SkillUpdate] Analyzing {len(failed_trajectories)} failed trajectories with o3...")
+        evolution_variant = update_config.get('evolution_variant', 'v0')
+        frozen_layers = update_config.get('frozen_layers', [])
+        print(
+            f"[SkillUpdate] Evolution variant={evolution_variant}, "
+            f"frozen_layers={frozen_layers}"
+        )
         new_skills = self.skill_updater.analyze_failures(
             failed_trajectories=failed_trajectories,
             current_skills=retrieval_memory.skills,
+            evolution_variant=evolution_variant,
+            frozen_layers=frozen_layers,
         )
 
         if new_skills:
@@ -902,7 +910,11 @@ class RayPPOTrainer:
             # where val scores are inflated by skills specifically targeting
             # the val set.
             if hasattr(self, 'envs') and hasattr(self.envs, 'retrieval_memory') and self.envs.retrieval_memory:
-                self.envs.retrieval_memory.add_skills(new_skills, category='general')
+                self.envs.retrieval_memory.add_skills(
+                    new_skills,
+                    category='general',
+                    frozen_layers=frozen_layers,
+                )
                 print(f"[SkillUpdate] Added {len(new_skills)} new skills to training envs")
 
             # Save updated skill bank (from training envs) to disk.

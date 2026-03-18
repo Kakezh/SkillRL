@@ -262,6 +262,8 @@ All parameters live under `env.skills_only_memory.*` (Hydra / OmegaConf).
 | `enable_dynamic_update` | bool | `False` | Evolve the skill bank during training using validation failures. |
 | `update_threshold` | float | `0.4` | Min success rate below which skills are updated. |
 | `max_new_skills` | int | `3` | Maximum new skills added per update cycle. |
+| `evolution_variant` | str | `"v0"` | Semantic layered evolution variant (`v0`/`v2`/`v3`/`v4`) for dynamic updates. |
+| `frozen_layers` | list[str] | `[]` | Layer names that must not be mutated during dynamic updates (e.g. `["action"]`). |
 ---
 
 ## 📋 Skill Bank Format
@@ -275,7 +277,8 @@ Skills are stored in a JSON file with three top-level keys:
       "skill_id": "gen_001",
       "title": "Systematic Exploration",
       "principle": "Search every plausible surface exactly once …",
-      "when_to_apply": "Anytime the goal object count is not yet met …"
+      "when_to_apply": "Anytime the goal object count is not yet met …",
+      "layer": "plan"
     }
   ],
   "task_specific_skills": {

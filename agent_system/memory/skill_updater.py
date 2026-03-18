@@ -10,7 +10,8 @@ Required environment variables:
 import json
 import os
 import re
-from typing import List, Dict, Any, Optional
+from typing import Dict, List, Optional
+
 from openai import AzureOpenAI
 
 
@@ -45,6 +46,8 @@ class SkillUpdater:
         self,
         failed_trajectories: List[Dict],
         current_skills: Dict,
+        evolution_variant: str = "v0",
+        frozen_layers: Optional[List[str]] = None,
     ) -> List[Dict]:
         """
         Analyse failed trajectories and generate new skills to address the gaps.
@@ -56,6 +59,10 @@ class SkillUpdater:
                 ``task_type``  – detected task category string
             current_skills: The current skill bank dict (with keys
                 ``general_skills``, ``task_specific_skills``, etc.)
+            evolution_variant: Layered evolution variant name (e.g. ``v0``,
+                ``v2``, ``v3``, ``v4``).
+            frozen_layers: Semantic layers that should not be changed
+                (e.g. ``["action"]``).
 
         Returns:
             List of new skill dicts ready to be passed to
@@ -69,7 +76,11 @@ class SkillUpdater:
         next_dyn_idx = self._next_dyn_index(current_skills)
 
         prompt = self._build_analysis_prompt(
-            failed_trajectories, current_skills, next_dyn_idx
+            failed_trajectories,
+            current_skills,
+            next_dyn_idx,
+            evolution_variant=evolution_variant,
+            frozen_layers=frozen_layers,
         )
 
         try:
@@ -82,7 +93,11 @@ class SkillUpdater:
 
             # Reassign dyn_ IDs on our side to guarantee no collisions,
             # regardless of what the LLM returned.
-            reassigned = self._reassign_dyn_ids(raw_skills, next_dyn_idx)
+            reassigned = self._reassign_dyn_ids(
+                raw_skills,
+                next_dyn_idx,
+                evolution_variant=evolution_variant,
+            )
 
             self.update_history.append({
                 'num_failures_analyzed': len(failed_trajectories),
@@ -121,15 +136,31 @@ class SkillUpdater:
 
         return max_idx + 1
 
-    def _reassign_dyn_ids(self, skills: List[Dict], start_idx: int) -> List[Dict]:
+    def _reassign_dyn_ids(
+        self,
+        skills: List[Dict],
+        start_idx: int,
+        evolution_variant: str = "v0",
+    ) -> List[Dict]:
         """
         Replace whatever skill_id values the LLM returned with guaranteed-unique
         ``dyn_NNN`` IDs starting from ``start_idx``.
         """
         reassigned = []
+        default_layer = self._default_layer_for_variant(evolution_variant)
+        allowed_layers = {"action", "plan", "scene"}
         for i, skill in enumerate(skills):
             updated = dict(skill)
             updated['skill_id'] = f"dyn_{start_idx + i:03d}"
+            layer = str(updated.get('layer', '')).strip().lower()
+            if layer and layer not in allowed_layers:
+                layer = ''
+            if not layer and default_layer:
+                layer = default_layer
+            if layer:
+                updated['layer'] = layer
+            elif 'layer' in updated:
+                updated.pop('layer')
             reassigned.append(updated)
         return reassigned
 
@@ -138,6 +169,8 @@ class SkillUpdater:
         failed_trajectories: List[Dict],
         current_skills: Dict,
         next_dyn_idx: int,
+        evolution_variant: str = "v0",
+        frozen_layers: Optional[List[str]] = None,
     ) -> str:
         # Format failure examples
         failure_examples = []
@@ -162,6 +195,27 @@ class SkillUpdater:
             f'"dyn_{next_dyn_idx + j:03d}"'
             for j in range(self.max_new_skills_per_update)
         )
+        normalized_variant = (evolution_variant or "v0").strip().lower()
+        frozen_layers = [
+            str(layer).strip().lower()
+            for layer in (frozen_layers or [])
+            if str(layer).strip()
+        ]
+        target_layer = self._default_layer_for_variant(normalized_variant)
+        if target_layer:
+            layer_instruction = (
+                f"- Evolution variant: {normalized_variant}\n"
+                f"- Generate skills for layer='{target_layer}' only.\n"
+            )
+        else:
+            layer_instruction = (
+                f"- Evolution variant: {normalized_variant}\n"
+                "- Layer is optional; only include if clearly inferable.\n"
+            )
+        if frozen_layers:
+            layer_instruction += (
+                f"- Frozen layers (do not mutate): {', '.join(sorted(set(frozen_layers)))}\n"
+            )
 
         return f"""Analyze these failed agent trajectories and suggest NEW skills to add to the skill bank.
 
@@ -173,6 +227,10 @@ EXISTING SKILL TITLES (avoid duplicating these):
 
 Generate 1-{self.max_new_skills_per_update} NEW actionable skills that would help avoid these failures.
 Each skill must have: skill_id, title (3-5 words), principle (1-2 sentences), when_to_apply.
+Optional field: layer (one of action/plan/scene).
+
+LAYERED EVOLUTION CONSTRAINTS:
+{layer_instruction}
 
 Use skill_ids: {example_ids}
 
@@ -180,6 +238,17 @@ Return ONLY a JSON array of skills, no other text.
 Example format:
 [{{"skill_id": "dyn_{next_dyn_idx:03d}", "title": "Verify Object Location First", "principle": "Before attempting to pick up an object, always verify its current location by examining the environment.", "when_to_apply": "When the task requires moving an object but its location is uncertain"}}]
 """
+
+    @staticmethod
+    def _default_layer_for_variant(evolution_variant: str) -> Optional[str]:
+        variant = (evolution_variant or "v0").strip().lower()
+        if variant == "v2":
+            return "plan"
+        if variant == "v3":
+            return "scene"
+        if variant == "v4":
+            return "plan"
+        return None
 
     def _format_trajectory(self, steps: List[Dict]) -> str:
         lines = []
