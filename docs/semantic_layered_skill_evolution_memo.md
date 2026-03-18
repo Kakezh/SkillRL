@@ -98,13 +98,13 @@
 
 ## 7) Metrics
 
-## 7.1 Task-Level（主指标）
+### 7.1 Task-Level（主指标）
 - Success rate
 - Step/action count
 - Token cost / latency
 - Seen vs shifted vs unseen transfer performance
 
-## 7.2 Layered-Skill Metrics（主线配套指标）
+### 7.2 Layered-Skill Metrics（主线配套指标）
 - **Action vocabulary drift / Action stability**
 - **Plan reuse rate**
 - **Scene adaptation success rate**
@@ -112,7 +112,7 @@
 - **Plan complexity change**（例如模板长度、分支数、子目标数）
 - **Evolution stability**（跨 seed 方差、曲线振荡）
 
-## 7.3 Secondary analysis（仅次要）
+### 7.3 Secondary analysis（仅次要）
 SkillNet 5 维质量分：
 - Safety
 - Completeness
@@ -185,19 +185,19 @@ SkillNet 5 维质量分：
 
 ## 10) Run order + decision gates
 
-## Stage 1: Feasibility / sanity check
+### Stage 1: Feasibility / sanity check
 目标：验证三层拆解在工程上可落地、可统计。
 - 产出：Action/Plan/Scene 映射覆盖率、最小可解释样例、基础统计脚本输出。
 - Gate G1：若拆解不可操作（覆盖率低、无法稳定映射），则收缩为“skill structure analysis”，停止大规模演化实验。
 
-## Stage 2: Main comparison（主结果）
+### Stage 2: Main comparison（主结果）
 目标：跑通 V0~V4 在 ALFWorld + WebShop（Search 视可落地性加入）。
 - 产出：Main Table 1 + Figure 1。
 - Gate G2：
   - 若 Plan-only 明显有效而 Scene-only 无增益：主线收敛为 Plan-layer evolution；
   - 若 Plan+Scene 明显优于其余：进入 Stage 3 完整消融。
 
-## Stage 3: Ablation
+### Stage 3: Ablation
 目标：验证关键机制而非扩展故事。
 - B: Action stability（fixed/partial/full mutable）
 - C: Scene generalization（seen/shifted/unseen）
@@ -206,7 +206,7 @@ SkillNet 5 维质量分：
 - Gate G3：
   - 若 Scene 有用但 Action stability 假设不成立：重述 thesis 中 Action 固定前提为“弱固定/受限可变”。
 
-## Stage 4: Optional secondary analysis
+### Stage 4: Optional secondary analysis
 目标：补充解释，不改主结论。
 - SkillNet 5 维评分（离线分析）
 - optional very light filtering
