@@ -465,24 +465,43 @@ class SkillsOnlyMemory(BaseMemory):
     # Dynamic update methods                                               #
     # ------------------------------------------------------------------ #
 
-    def add_skills(self, new_skills: List[Dict], category: str = 'general') -> int:
+    def add_skills(
+        self,
+        new_skills: List[Dict],
+        category: str = 'general',
+        frozen_layers: Optional[List[str]] = None,
+    ) -> int:
         """
         Add new skills to the bank and invalidate the embedding cache.
 
         Args:
             new_skills: List of skill dicts to add.
             category:   ``'general'`` or a task-type key (e.g. ``'clean'``).
+            frozen_layers: Optional list of semantic layers that must not be
+                           mutated (e.g. ``["action"]``).
 
         Returns:
             Number of skills actually added (duplicates are skipped).
         """
         added = 0
         existing_ids = self._get_all_skill_ids()
+        frozen_layer_set = {
+            str(layer).strip().lower()
+            for layer in (frozen_layers or [])
+            if str(layer).strip()
+        }
 
         for skill in new_skills:
             skill_id = skill.get('skill_id')
             if skill_id in existing_ids:
                 print(f"[SkillsOnlyMemory] Skipping duplicate skill: {skill_id}")
+                continue
+            skill_layer = str(skill.get('layer', '')).strip().lower()
+            if skill_layer and skill_layer in frozen_layer_set:
+                print(
+                    f"[SkillsOnlyMemory] Skipping frozen-layer skill: "
+                    f"{skill_id} (layer={skill_layer})"
+                )
                 continue
 
             if category == 'general':
