@@ -39,61 +39,352 @@ SkillRL is a framework that enables LLM agents to learn high-level, reusable beh
 
 ### 1) 顶层模块分工
 
-- `memory_data/`: 训练所需记忆数据、技能库与提示词模板。
-- `skill_generation/`: 将原始轨迹总结为 `general_skills`、`task_specific_skills`、`common_mistakes` 的脚本。
-- `agent_system/`: 环境管理、轨迹收集、多轮交互、奖励管理与技能检索注入。
-- `verl/`: 训练框架主体（PPO/GRPO 训练器、worker、配置系统）。
-- `gigpo/`: GiGPO 算法相关实现。
-- `examples/`: 按任务划分的训练/生成脚本（alfworld、webshop、search）。
-- `tests/`: 单元测试、Ray CPU/GPU 测试与端到端测试。
-- `docs/`: 算法与工程文档。
+| 目录 | 职责 | 关键文件 |
+|------|------|----------|
+| `memory_data/` | 训练所需记忆数据、技能库 JSON 与提示词模板 | `memory_data/alfworld/claude_style_skills.json`、`memory_data/prompt/prompt.txt` |
+| `skill_generation/` | 将原始轨迹总结为 `general_skills`、`task_specific_skills`、`common_mistakes` | `skill_generation/alfworld.py`、`skill_generation/webshop.py`、`skill_generation/search.py` |
+| `agent_system/` | 环境管理、多轮轨迹收集、奖励管理、技能检索注入 | `agent_system/environments/env_manager.py`、`agent_system/multi_turn_rollout/rollout_loop.py`、`agent_system/memory/skills_only_memory.py` |
+| `verl/` | 训练框架主体（PPO/GRPO 训练器、Ray Worker、配置系统） | `verl/trainer/main_ppo.py`、`verl/trainer/ppo/ray_trainer.py` |
+| `gigpo/` | GiGPO 算法（episode + step 两级优势估计） | `gigpo/core_gigpo.py` |
+| `examples/` | 按任务划分的训练/生成启动脚本 | `examples/grpo_trainer/run_alfworld_skills.sh` |
+| `tests/` | 单元测试、Ray CPU/GPU 测试与端到端测试 | `tests/` |
+| `docs/` | 算法与工程文档 | `docs/algo/ppo.md` |
 
-### 2) 端到端训练闭环
+---
 
-1. **Memory Generation**：使用基础模型生成初始轨迹（经验数据）。
-2. **SFT**：对基础模型做监督微调，获得可执行任务的初始策略。
-3. **Skill Generation**：把成功/失败轨迹抽象为技能库 JSON。
-4. **RL with SkillBank**：训练时检索并注入技能，提升策略更新效率。
-5. **Dynamic Skill Update（可选）**：从验证失败案例中迭代生成新技能并回灌技能库。
+### 2) 端到端数据流总览
 
-对应入口与实现：
+```
+原始轨迹 (JSON)
+      │
+      ▼  skill_generation/{alfworld,webshop,search}.py
+技能库 JSON (general_skills / task_specific_skills / common_mistakes)
+      │
+      ▼  verl/trainer/main_ppo.py  ──  TaskRunner.run()
+初始化阶段:
+  make_envs(config)  ──────────────────→  SkillsOnlyMemory / RetrievalMemory
+  TrajectoryCollector(config, tokenizer)
+  RayPPOTrainer(config, ..., traj_collector, envs)
+      │
+      ▼  RayPPOTrainer.fit()  (verl/trainer/ppo/ray_trainer.py)
+      │
+      ├─ ① 多轮交互  TrajectoryCollector.multi_turn_loop()
+      │       env.reset() → 检索技能 → 环境 obs + 技能 → LLM 生成动作
+      │       → env.step() → 收集 step_reward → 重复至 done/max_steps
+      │       → DataProto (responses, rewards, log_probs, ...)
+      │
+      ├─ ② 奖励计算  EpisodeRewardManager.__call__()
+      │       episode_rewards → token_level_scores → apply_invalid_action_penalty()
+      │       → (可选) apply_kl_penalty()  → token_level_rewards
+      │
+      ├─ ③ 优势估计  compute_advantage()
+      │       GAE / GRPO / GiGPO / REINFORCE++ / RLOO / REMAX
+      │       → advantages, returns
+      │
+      ├─ ④ 策略更新
+      │       critic_wg.update_critic(batch)   [仅 GAE]
+      │       actor_wg.update_actor(batch)
+      │
+      └─ ⑤ 动态技能进化（可选, 每次验证后触发）
+              _update_skills_from_validation()
+              → SkillUpdater.analyze_failures()  [Azure o3 API]
+              → SkillsOnlyMemory.add_skills()  → 回写技能库 JSON
+```
 
-- RL 训练入口：`verl/trainer/main_ppo.py`
-- 数据生成入口：`verl/trainer/main_generation.py`
-- 训练循环核心：`verl/trainer/ppo/ray_trainer.py`
-- 技能检索核心：`agent_system/memory/skills_only_memory.py`
-- 技能动态更新：`agent_system/memory/skill_updater.py`
+---
 
-### 3) 训练时技能是如何接入的
+### 3) 数据准备：技能库生成
 
-- 开启 `+env.use_skills_only_memory=True` 后，环境管理器会使用技能记忆模块。
-- 支持两种检索：
-  - **Template mode**：按任务类别/关键词注入通用技能 + 类别技能。
-  - **Embedding mode**：按语义相似度检索最相关技能（跨类别排序后 top-k 注入）。
-- 技能最终拼接进环境提示词，参与每个 episode 的决策上下文。
+**代码**：`skill_generation/alfworld.py`、`skill_generation/webshop.py`、`skill_generation/search.py`
 
-### 4) 三个环境如何接线
+```
+原始记忆 JSON
+    ↓ categorize_by_task_type()          # alfworld.py:70
+    分任务类型:
+      ALFWorld: pick_and_place / look_at_obj_in_light / clean / heat / cool / examine
+      WebShop:  apparel / footwear / electronics / accessories / home_decor / beauty_health / other
+      Search:   direct_retrieval / multi_hop_reasoning / entity_attribute_lookup / comparison
+    ↓ generate_skills_for_task_type()    # alfworld.py:100+
+    调用 Azure o3 API (OpenAIClient.generate_response)  # alfworld.py:55
+    ↓
+输出: claude_style_skills.json
+    {
+      "general_skills":       [{ skill_id, title, principle, when_to_apply, layer }],
+      "task_specific_skills": { "pick_and_place": [...], "clean": [...], ... },
+      "common_mistakes":      [{ mistake_id, description, why_it_happens, how_to_avoid }]
+    }
+```
 
-- `agent_system/environments/env_package/alfworld`
-- `agent_system/environments/env_package/webshop`
-- `agent_system/environments/env_package/search`
+- 成功轨迹 → 抽象为可迁移的通用/类别技能
+- 失败轨迹 → 抽象为 `common_mistakes`（常见错误及规避方式）
 
-三者共用统一训练框架与 SkillBank 接口，差异主要体现在：
+---
 
-- 环境动作空间与交互 API；
-- 任务类别划分与 prompt 模板；
-- 技能库数据文件与检索语料。
+### 4) 训练初始化与入口
 
-### 5) 快速阅读建议（从工程角度）
+**代码**：`verl/trainer/main_ppo.py`
+
+```python
+# 入口（Hydra 配置加载）
+@hydra.main(config_path="config", config_name="ppo_trainer")   # main_ppo.py:29
+def main(config): run_ppo(config)
+
+# run_ppo() 初始化 Ray 集群，然后启动 TaskRunner  # main_ppo.py:34-51
+runner = TaskRunner.remote()
+ray.get(runner.run.remote(config))
+
+# TaskRunner.run() 完成以下初始化步骤              # main_ppo.py:56-188
+# 1. 下载模型检查点
+local_path = copy_to_local(config.actor_rollout_ref.model.path)
+
+# 2. 初始化环境（含技能记忆模块）
+envs, val_envs = make_envs(config)                # main_ppo.py:71
+
+# 3. 初始化分词器与处理器
+tokenizer = hf_tokenizer(local_path)              # main_ppo.py:77
+processor = hf_processor(local_path)              # main_ppo.py:78
+
+# 4. 创建多轮轨迹收集器
+traj_collector = TrajectoryCollector(config, tokenizer, processor)  # main_ppo.py:162
+
+# 5. 创建训练/验证数据集
+train_dataset = create_rl_dataset(...)            # main_ppo.py:166
+val_dataset   = create_rl_dataset(...)            # main_ppo.py:167
+
+# 6. 初始化 PPO 训练器并启动
+trainer = RayPPOTrainer(...)                      # main_ppo.py:169-186
+trainer.init_workers()                            # main_ppo.py:187
+trainer.fit()                                     # main_ppo.py:188
+```
+
+---
+
+### 5) 多轮交互收集轨迹
+
+**代码**：`agent_system/multi_turn_rollout/rollout_loop.py`
+
+```python
+class TrajectoryCollector:                        # rollout_loop.py:29
+    def multi_turn_loop(
+        self, gen_batch, actor_rollout_wg, envs, is_train
+    ) -> DataProto:
+```
+
+**数据流**（每个 training step）：
+
+```
+gen_batch (DataProto, 含 raw_prompt)
+    ↓  envs.reset(kwargs)                     # env_manager.py:76
+    初始观测 obs (text / image / anchor) + 技能上下文
+    ↓
+    循环 (step = 0 → max_steps):
+        preprocess_single_sample()             # rollout_loop.py:43
+            obs → input_ids / attention_mask / position_ids
+        actor_rollout_wg.generate_sequences()  # LLM 推理
+        tokenizer.decode → text action
+        envs.step(text_actions)               # env_manager.py
+            → next_obs, rewards, dones, infos
+        收集: step_reward, is_action_valid, anchor_obs
+    ↓
+输出 DataProto:
+    responses, attention_mask, log_probs,
+    token_level_scores (episode_reward),
+    step_rewards, is_action_valid, anchor_obs, uid, traj_uid
+```
+
+---
+
+### 6) 奖励计算
+
+**代码**：`agent_system/reward_manager/episode.py`、`verl/trainer/ppo/ray_trainer.py:200-224`
+
+```python
+class EpisodeRewardManager:                       # episode.py:20
+    def __call__(self, data: DataProto):
+        # 取 episode 最终奖励（0/1 成功标志），
+        # 放到最后一个有效 response token 的位置
+        reward_tensor[i, valid_response_length - 1] = episode_rewards[i]  # episode.py:79
+
+# 无效动作惩罚（可选）
+apply_invalid_action_penalty(data, coef)          # ray_trainer.py:200
+    reward_tensor[i, valid_response_length-1] -= coef * action_invalids
+
+# KL 惩罚（可选，use_kl_in_reward=True 时）
+apply_kl_penalty(data, kl_ctrl)                   # ray_trainer.py:152
+    kld = kl_penalty(old_log_probs, ref_log_prob)
+    token_level_rewards = token_level_scores - beta * kld
+```
+
+---
+
+### 7) 优势估计
+
+**代码**：`verl/trainer/ppo/ray_trainer.py:244-362`
+
+```python
+def compute_advantage(data, adv_estimator, gamma, lam, ...):  # ray_trainer.py:244
+```
+
+| 估计器 | 算法 | 实现位置 |
+|--------|------|---------|
+| `GAE` | Generalized Advantage Estimation（需 Critic） | `verl/trainer/ppo/core_algos.py:compute_gae_advantage_return` |
+| `GRPO` | 同一 prompt 多条轨迹组内归一化 | `verl/trainer/ppo/core_algos.py:compute_grpo_outcome_advantage` |
+| `GiGPO` | episode 组 + step 组两级优势，支持相似观测聚类 | `gigpo/core_gigpo.py:compute_gigpo_outcome_advantage` |
+| `REINFORCE++` | 带 baseline 的 outcome 优势 | `verl/trainer/ppo/core_algos.py:compute_reinforce_plus_plus_outcome_advantage` |
+| `RLOO` | Leave-One-Out 估计 | `verl/trainer/ppo/core_algos.py:compute_rloo_outcome_advantage` |
+| `REMAX` | Reward Maximization baseline | `verl/trainer/ppo/core_algos.py:compute_remax_outcome_advantage` |
+
+**GiGPO 数据流**（`gigpo/core_gigpo.py`）：
+
+```
+token_level_rewards  ──→ episode-level group advantage
+step_rewards         ──→ step-level group advantage
+anchor_obs           ──→ are_similar() 文本相似度聚类  (core_gigpo.py:72)
+    ↓
+advantages = episode_adv + step_advantage_w * step_adv
+```
+
+---
+
+### 8) 策略更新
+
+**代码**：`verl/trainer/ppo/ray_trainer.py`
+
+```python
+# Critic 更新（仅 GAE 估计器，需要 value 网络）       # ray_trainer.py:1452-1457
+if self.use_critic:
+    critic_output = self.critic_wg.update_critic(batch)
+
+# Actor 更新（PPO clip 损失）                         # ray_trainer.py:1459-1466
+if self.config.trainer.critic_warmup <= self.global_steps:
+    actor_output = self.actor_rollout_wg.update_actor(batch)
+# 输入: input_ids, attention_mask, old_log_probs, advantages, returns
+# 输出: actor_loss, entropy, pg_clipfrac, ...
+
+# 检查点保存                                          # ray_trainer.py:1125-1156
+_save_checkpoint()
+# 保存 actor weights + critic weights + dataloader 状态
+```
+
+---
+
+### 9) 技能检索注入
+
+**代码**：`agent_system/memory/skills_only_memory.py`
+
+```python
+class SkillsOnlyMemory(BaseMemory):               # skills_only_memory.py:36
+    def __init__(self, skills_json_path, retrieval_mode="template",
+                 embedding_model_path=None, task_specific_top_k=None):
+        # 加载技能库 JSON                          # skills_only_memory.py:86-88
+        with open(skills_json_path) as f:
+            self.skills = json.load(f)
+        # embedding 模式下预计算技能向量            # skills_only_memory.py:108-109
+        if retrieval_mode == "embedding":
+            self._compute_skill_embeddings()
+```
+
+**两种检索模式**：
+
+| 模式 | 流程 | 关键代码 |
+|------|------|---------|
+| **Template**（默认） | `_detect_task_type(task_desc)` 关键词匹配任务类别 → 返回该类别全部技能 + 前 top_k 条通用技能 | `skills_only_memory.py:115-177` |
+| **Embedding** | 任务描述 → SentenceTransformer 编码 → 与所有技能向量做余弦相似度 → top-k 排序注入 | `skills_only_memory.py:253+` |
+
+**技能注入时机**（在环境 `reset()` 时）：
+
+```python
+# env_manager.py:90-98 (SearchEnvironmentManager.reset 为例)
+for task in self.tasks:
+    memories = self.retrieval_memory.retrieve(
+        task_description=task, top_k=top_k, ...)
+    self.retrieved_memories.append(memories)
+# retrieved_memories 之后在 build_text_obs() 中拼入 prompt
+```
+
+---
+
+### 10) 动态技能进化（可选）
+
+**代码**：`verl/trainer/ppo/ray_trainer.py:837-931`、`agent_system/memory/skill_updater.py`
+
+**触发条件**：每次验证结束后，若某任务类型成功率 < `update_threshold`（默认 0.4）：
+
+```python
+def _update_skills_from_validation(
+    self, sample_inputs, sample_outputs, sample_scores, success_rate
+):                                                # ray_trainer.py:837
+
+    # 1. 检测低成功率任务类型
+    for task_key, rate in success_rate.items():
+        if rate < threshold:
+            low_success_tasks.append(task_type)  # ray_trainer.py:855-860
+
+    # 2. 收集失败轨迹
+    failed_trajectories = _collect_failed_trajectories(...)  # ray_trainer.py:869
+
+    # 3. 调用 o3 API 分析失败并生成新技能
+    new_skills = skill_updater.analyze_failures(
+        failed_trajectories=failed_trajectories,
+        current_skills=retrieval_memory.skills,
+        evolution_variant=evolution_variant,     # v0/v2/v3/v4
+        frozen_layers=frozen_layers,             # ray_trainer.py:898-903
+    )
+
+    # 4. 注入新技能到训练环境（不回流验证环境，防止数据泄漏）
+    self.envs.retrieval_memory.add_skills(new_skills, category='general')  # ray_trainer.py:913
+
+    # 5. 保存更新后的技能库 JSON
+    train_memory.save_skills(save_path)          # ray_trainer.py:927
+```
+
+**`SkillUpdater.analyze_failures()`**（`skill_updater.py:45`）：
+
+```
+failed_trajectories (task, trajectory, task_type)
+    ↓  _build_analysis_prompt()   → 构造包含失败轨迹与当前技能库的 prompt
+    ↓  Azure o3 API               → 生成新技能 JSON
+    ↓  _parse_skills_response()   → 解析并去重
+输出: List[Dict]  新技能列表 (skill_id="dyn_NNN", ...)
+```
+
+---
+
+### 11) 三个环境如何接线
+
+**代码**：`agent_system/environments/env_manager.py`
+
+三个环境共用同一套 `EnvironmentManagerBase` 接口与 SkillBank 接入方式，差异如下：
+
+| 环境 | 管理类 | 动作空间 | 技能分类维度 |
+|------|--------|---------|-------------|
+| ALFWorld | `AlfWorldEnvironmentManager` | 文本指令（pick up / go to / ...） | 6 类家务任务（pick_and_place、clean、heat 等） |
+| WebShop | `WebShopEnvironmentManager` | 搜索/点击/购买操作 | 7 类商品类别（apparel、electronics 等） |
+| Search | `SearchEnvironmentManager` | 搜索查询文本 | 4 类问题类型（direct_retrieval、multi_hop 等） |
+
+**通用接口**（`agent_system/environments/base.py`）：
+
+```python
+class EnvironmentManagerBase:
+    def reset(self, kwargs) -> (obs, infos)     # 重置并返回初始观测（含技能上下文）
+    def step(self, text_actions) -> (obs, rewards, dones, infos)
+    def build_text_obs() -> List[str]           # 将 obs + 检索技能拼装成 LLM prompt
+```
+
+---
+
+### 12) 快速阅读建议（从工程角度）
 
 建议按以下顺序阅读代码：
 
 1. `examples/grpo_trainer/run_*_skills.sh`（先看训练参数如何启用技能）
-2. `verl/trainer/main_ppo.py` + `verl/trainer/ppo/ray_trainer.py`（看训练主循环）
-3. `agent_system/environments/env_manager.py`（看环境与记忆模块挂接）
-4. `agent_system/memory/skills_only_memory.py`（看技能检索逻辑）
-5. `agent_system/memory/skill_updater.py`（看动态技能进化）
-6. `skill_generation/*.py`（看技能库构建过程）
+2. `verl/trainer/main_ppo.py`（看初始化流程与各模块组装）
+3. `verl/trainer/ppo/ray_trainer.py`（看训练主循环：`fit()`）
+4. `agent_system/multi_turn_rollout/rollout_loop.py`（看多轮交互与轨迹收集）
+5. `agent_system/environments/env_manager.py`（看环境与记忆模块挂接）
+6. `agent_system/memory/skills_only_memory.py`（看技能检索逻辑）
+7. `agent_system/memory/skill_updater.py`（看动态技能进化）
+8. `skill_generation/*.py`（看技能库构建过程）
 
 ---
 
