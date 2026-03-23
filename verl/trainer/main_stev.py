@@ -18,6 +18,7 @@ textual feedback, without PPO/GRPO weight updates.
 """
 
 import os
+import re
 from pprint import pprint
 
 import hydra
@@ -30,11 +31,19 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.utils.fs import copy_to_local
 
+MAX_OBSERVATION_LENGTH = 3000
+MAX_ACTION_LENGTH = 2000
+TASK_TYPE_KEYWORDS = (
+    ("clean", "clean"),
+    ("heat", "heat"),
+    ("cool", "cool"),
+    ("examine", "examine"),
+)
+
 
 def _extract_task_description(inp: str) -> str:
-    import re
     patterns = [
-        r'(?:Your task is to|Task:|task is to|you need to)[:\s]+(.*?)(?:\n|$)',
+        r'(?:Your task is to|Task:|you need to)[:\s]+(.*?)(?:\n|$)',
         r'(?:goal|objective)[:\s]+(.*?)(?:\n|$)',
     ]
     for pat in patterns:
@@ -46,16 +55,11 @@ def _extract_task_description(inp: str) -> str:
 
 def _detect_task_type_from_input(inp: str) -> str:
     inp_lower = inp.lower()
-    if 'clean' in inp_lower:
-        return 'clean'
-    if 'heat' in inp_lower:
-        return 'heat'
-    if 'cool' in inp_lower:
-        return 'cool'
     if 'look at' in inp_lower and ('lamp' in inp_lower or 'light' in inp_lower):
         return 'look_at_obj_in_light'
-    if 'examine' in inp_lower:
-        return 'examine'
+    for keyword, task_type in TASK_TYPE_KEYWORDS:
+        if keyword in inp_lower:
+            return task_type
     return 'pick_and_place'
 
 
@@ -64,26 +68,25 @@ def _collect_trajectory_candidates(
     outputs: list[str],
     scores: list[float],
     traj_uids,
-    score_threshold: float,
+    max_failure_score: float,
     max_trajectories: int,
 ) -> list[dict]:
     selected = []
     seen_uids = set()
     for i, (inp, out, score) in enumerate(zip(inputs, outputs, scores)):
-        uid = traj_uids[i] if traj_uids is not None else f"traj_{i}"
+        uid = traj_uids[i] if traj_uids is not None and i < len(traj_uids) else f"traj_{i}"
         if uid in seen_uids:
             continue
         seen_uids.add(uid)
-        if score > score_threshold:
-            continue
-        selected.append({
-            "task": _extract_task_description(inp),
-            "task_type": _detect_task_type_from_input(inp),
-            "trajectory": [
-                {"action": "", "observation": inp[:3000]},
-                {"action": out[:2000], "observation": ""},
-            ],
-        })
+        if score <= max_failure_score:
+            selected.append({
+                "task": _extract_task_description(inp),
+                "task_type": _detect_task_type_from_input(inp),
+                "trajectory": [
+                    {"action": "", "observation": inp[:MAX_OBSERVATION_LENGTH]},
+                    {"action": out[:MAX_ACTION_LENGTH], "observation": ""},
+                ],
+            })
         if len(selected) >= max_trajectories:
             break
     return selected
@@ -122,11 +125,17 @@ class STEVTaskRunner:
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
 
-        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+        )
         envs, _ = make_envs(config)
         retrieval_memory = getattr(envs, "retrieval_memory", None)
         if retrieval_memory is None:
-            raise RuntimeError("No retrieval memory found. Please enable env.use_skills_only_memory for STEV evolution.")
+            raise RuntimeError(
+                "No retrieval memory found. Please enable env.use_skills_only_memory "
+                "(and configure env.skills_only_memory.*) for STEV evolution."
+            )
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
@@ -155,12 +164,16 @@ class STEVTaskRunner:
             config=config.actor_rollout_ref,
             role="actor_rollout",
         )
-        actor_rollout_wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=actor_rollout_cls, device_name=config.trainer.device)
+        actor_rollout_wg = RayWorkerGroup(
+            resource_pool=resource_pool,
+            ray_cls_with_init=actor_rollout_cls,
+            device_name=config.trainer.device,
+        )
         actor_rollout_wg.init_model()
 
         skill_updater = SkillUpdater(
-            max_new_skills_per_update=config.stev.get("max_new_skills", 3),
-            max_completion_tokens=config.stev.get("max_completion_tokens", 2048),
+            max_new_skills_per_update=config.stev.max_new_skills,
+            max_completion_tokens=config.stev.max_completion_tokens,
         )
 
         global_steps = 0
@@ -199,8 +212,8 @@ class STEVTaskRunner:
                     outputs=outputs,
                     scores=scores,
                     traj_uids=traj_uids,
-                    score_threshold=config.stev.get("score_threshold", 0.0),
-                    max_trajectories=config.stev.get("max_failed_trajectories", 10),
+                    max_failure_score=config.stev.max_failure_score,
+                    max_trajectories=config.stev.max_failed_trajectories,
                 )
                 if not candidates:
                     global_steps += 1
@@ -213,13 +226,15 @@ class STEVTaskRunner:
                     frozen_layers=config.env.skills_only_memory.get("frozen_layers", []),
                 )
                 if new_skills:
+                    skill_category = config.stev.get("skill_category", "general")
                     added = retrieval_memory.add_skills(
                         new_skills,
-                        category='general',
+                        category=skill_category,
                         frozen_layers=config.env.skills_only_memory.get("frozen_layers", []),
                     )
                     if added > 0:
-                        save_path = os.path.join(config.trainer.default_local_dir, f"updated_skills_step{global_steps}.json")
+                        save_file = f"updated_skills_step{global_steps}.json"
+                        save_path = os.path.join(config.trainer.default_local_dir, save_file)
                         retrieval_memory.save_skills(save_path)
                         print(f"[STEV] step={global_steps} added={added} saved={save_path}")
                 global_steps += 1

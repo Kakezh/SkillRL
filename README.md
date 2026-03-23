@@ -563,13 +563,13 @@ For the lightweight experiment setting (skip SFT and skip PPO/GRPO updates), use
 ```bash
 python -m verl.trainer.main_stev \
   data.train_files=PATH_TO_TRAIN_PARQUET \
-  actor_rollout_ref.model.path=Qwen2.5-3B-Instruct \
+  actor_rollout_ref.model.path=PATH_TO_QWEN2_5_3B_INSTRUCT \
   env.use_skills_only_memory=True \
   env.skills_only_memory.skills_json_path=memory_data/alfworld/claude_style_skills.json \
   env.skills_only_memory.retrieval_mode=embedding \
   env.skills_only_memory.embedding_model_path=Qwen/Qwen3-Embedding-0.6B \
   env.skills_only_memory.evolution_variant=v4 \
-  env.skills_only_memory.frozen_layers='[]'
+  env.skills_only_memory.frozen_layers=[]
 ```
 
 Default config file: `verl/trainer/config/stev_generator.yaml`

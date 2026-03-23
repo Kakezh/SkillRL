@@ -1,7 +1,7 @@
 data:
   tokenizer: null
   use_shm: False
-  train_files: ~/data/rlhf/gsm8k/train.parquet
+  train_files: null
   prompt_key: prompt
   max_prompt_length: 512
   max_response_length: 512
@@ -19,7 +19,7 @@ data:
 actor_rollout_ref:
   hybrid_engine: True
   model:
-    path: ~/models/Qwen2.5-3B-Instruct
+    path: null
     use_shm: False
     external_lib: null
     trust_remote_code: False
@@ -72,7 +72,7 @@ algorithm:
     enable: False
 
 trainer:
-  total_epochs: 10
+  total_epochs: 10  # recommendation: 5-10 for smoke runs, 20-50 for stable evolution experiments
   project_name: skillrl_stev
   experiment_name: no_rl_light
   logger: ['console']
@@ -118,7 +118,8 @@ env:
     frozen_layers: []
 
 stev:
-  score_threshold: 0.0
+  max_failure_score: 0.0
   max_failed_trajectories: 10
   max_new_skills: 3
   max_completion_tokens: 2048
+  skill_category: general
