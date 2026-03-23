@@ -555,6 +555,24 @@ All parameters live under `env.skills_only_memory.*` (Hydra / OmegaConf).
 | `max_new_skills` | int | `3` | Maximum new skills added per update cycle. |
 | `evolution_variant` | str | `"v0"` | Semantic layered evolution variant (`v0`/`v2`/`v3`/`v4`) for dynamic updates. |
 | `frozen_layers` | list[str] | `[]` | Layer names that must not be mutated during dynamic updates (e.g. `["action"]`). |
+
+### Lightweight No-RL STEV Evolution (No SFT / No PPO)
+
+For the lightweight experiment setting (skip SFT and skip PPO/GRPO updates), use the dedicated STEV entrypoint:
+
+```bash
+python -m verl.trainer.main_stev \
+  data.train_files=PATH_TO_TRAIN_PARQUET \
+  actor_rollout_ref.model.path=PATH_TO_QWEN2_5_3B_INSTRUCT \
+  env.use_skills_only_memory=True \
+  env.skills_only_memory.skills_json_path=memory_data/alfworld/claude_style_skills.json \
+  env.skills_only_memory.retrieval_mode=embedding \
+  env.skills_only_memory.embedding_model_path=Qwen/Qwen3-Embedding-0.6B \
+  env.skills_only_memory.evolution_variant=v4 \
+  env.skills_only_memory.frozen_layers=[]
+```
+
+Default config file: `verl/trainer/config/stev_generator.yaml`
 ---
 
 ## 📋 Skill Bank Format

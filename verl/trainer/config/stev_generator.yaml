@@ -1,0 +1,125 @@
+data:
+  tokenizer: null
+  use_shm: False
+  train_files: null
+  prompt_key: prompt
+  max_prompt_length: 512
+  max_response_length: 512
+  train_batch_size: 256
+  shuffle: True
+  truncation: error
+  image_key: images
+  video_key: videos
+  trust_remote_code: False
+  apply_chat_template_kwargs: {}
+  custom_cls:
+    path: null
+    name: null
+
+actor_rollout_ref:
+  hybrid_engine: True
+  model:
+    path: null
+    use_shm: False
+    external_lib: null
+    trust_remote_code: False
+  actor:
+    strategy: fsdp
+  rollout:
+    name: vllm
+    mode: sync
+    temperature: 1.0
+    top_k: -1
+    top_p: 1
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    dtype: bfloat16
+    gpu_memory_utilization: 0.5
+    ignore_eos: False
+    enforce_eager: True
+    free_cache_engine: True
+    load_format: dummy_dtensor
+    tensor_model_parallel_size: 1
+    max_num_batched_tokens: 8192
+    max_model_len: null
+    max_num_seqs: 1024
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_use_dynamic_bsz: False
+    log_prob_max_token_len_per_gpu: 16384
+    disable_log_stats: True
+    enable_chunked_prefill: True
+    do_sample: True
+    n: 1
+    multi_turn:
+      enable: False
+      max_turns: null
+      tool_config_path: null
+      format: chatml
+    val_kwargs:
+      top_k: -1
+      top_p: 1.0
+      temperature: 0
+      n: 1
+      do_sample: False
+  ref:
+    strategy: fsdp
+  critic:
+    strategy: fsdp
+
+algorithm:
+  filter_groups:
+    enable: False
+
+trainer:
+  total_epochs: 10  # recommendation: 5-10 for smoke runs, 20-50 for stable evolution experiments
+  project_name: skillrl_stev
+  experiment_name: no_rl_light
+  logger: ['console']
+  nnodes: 1
+  n_gpus_per_node: 1
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  device: cuda
+
+ray_init:
+  num_cpus: null
+
+env:
+  env_name: alfworld/AlfredTWEnv
+  seed: 0
+  max_steps: 50
+  history_length: 2
+  resources_per_worker:
+    num_cpus: 0.1
+    num_gpus: 0
+  rollout:
+    n: 1
+  alfworld:
+    eval_dataset: eval_in_distribution
+  search:
+    log_requests: false
+    search_url: "http://127.0.0.1:8000/retrieve"
+    topk: 3
+    timeout: 60
+  webshop:
+    use_small: True
+    human_goals: False
+  use_skills_only_memory: True
+  skills_only_memory:
+    skills_json_path: memory_data/alfworld/claude_style_skills.json
+    top_k: 6
+    retrieval_mode: embedding
+    embedding_model_path: Qwen/Qwen3-Embedding-0.6B
+    task_specific_top_k: 5
+    enable_dynamic_update: True
+    update_threshold: 0.4
+    max_new_skills: 3
+    evolution_variant: v4
+    frozen_layers: []
+
+stev:
+  max_failure_score: 0.0
+  max_failed_trajectories: 10
+  max_new_skills: 3
+  max_completion_tokens: 2048
+  skill_category: general
